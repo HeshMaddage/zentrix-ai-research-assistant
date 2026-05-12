@@ -1,0 +1,38 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+ 
+# ── ChromaDB persistent storage (large binary; recreated on first run) ────────
+chroma_data/
+ 
+# ── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+*.pyo
+ 
+# ── Virtual environment ───────────────────────────────────────────────────────
+venv/
+.venv/
+env/
+ 
+# ── Editors / OS ──────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+Thumbs.db
+ 
+# ── Build artefacts ───────────────────────────────────────────────────────────
+dist/
+build/
+*.egg-info/
+ 
+# ── Pytest cache ──────────────────────────────────────────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+ 
+# ── Streamlit cache ───────────────────────────────────────────────────────────
+.streamlit/
