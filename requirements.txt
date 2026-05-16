@@ -1,25 +1,27 @@
 # Zentrix AI Research Assistant — Dependencies
  
-# ── Core LLM / Agent Framework ──────────────────────────────────────────────
+# Core LLM / Agent Framework 
 langchain==0.3.25
 langchain-community==0.3.24
 langchain-openai==0.3.18
 langgraph==0.4.5
  
-# ── Vector Store ─────────────────────────────────────────────────────────────
+# Vector Store
 chromadb==0.6.3
  
-# ── Embeddings (local, free) ─────────────────────────────────────────────────
+# Embeddings (local, free)
 sentence-transformers==3.4.1
  
-# ── Web Search ───────────────────────────────────────────────────────────────
+# Web Search
 tavily-python==0.5.1
  
-# ── UI ───────────────────────────────────────────────────────────────────────
+# UI 
 streamlit==1.43.2
  
-# ── Data Validation ──────────────────────────────────────────────────────────
+# Data Validation 
 pydantic==2.11.3
  
-# ── Environment / Config ─────────────────────────────────────────────────────
+# Environment / Config 
 python-dotenv==1.1.0
+
+langchain-text-splitters==0.3.8
