@@ -22,6 +22,8 @@ from langchain_core.messages import AIMessage
 from agent.state import AgentState
 from memory.chroma_manager import ChromaMemoryManager
 from models.research_note import ResearchNote
+from prompts.synthesis_prompt import synthesise_note
+from tools.web_search import WebSearchResult, search_and_chunk
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -198,33 +200,119 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
 
     def search_web(state: AgentState) -> dict:
         """
-        Node 2b: Search the web using Tavily.
-
+        Search Tavily, chunk results, and immediately persist raw evidence to
+        ChromaDB source_chunks — BEFORE synthesis, so evidence is never lost.
+ 
+        Raw chunks are saved per-URL so that each chunk carries an accurate
+        'url' metadata key for source attribution in future retrieval.
+ 
+        State reads:  query, session_id
+        State writes: web_results (serialised WebSearchResult dict)
         """
-        query = state.get("query", "")
-        logger.info(f"[STUB] search_web: would search for '{query}'")
-
-        # Placeholder so downstream nodes don't crash on missing key
-        return {
-            "web_results": {
-                "query": query,
-                "results": [],
-                "status": "stub — web search not yet implemented",
-            }
-        }
+        query: str = state.get("query", "")
+        session_id: str = state.get("session_id", "unknown-session")
+ 
+        if not query:
+            logger.warning("search_web: empty query — returning empty web_results")
+            return {"web_results": {"query": "", "results": [], "chunks": [], "total_chunks": 0}}
+ 
+        logger.info(f"search_web: calling Tavily for '{query}'")
+ 
+        # search and chunk
+        web_result: WebSearchResult = search_and_chunk(query)
+ 
+        logger.info(
+            f"search_web: {len(web_result.results)} results, "
+            f"{web_result.total_chunks} chunks"
+        )
+ 
+        # Persist raw chunks to source_chunks BEFORE synthesis 
+        # Save per-URL so metadata correctly attributes each chunk.
+        chunks_saved_total = 0
+        for result in web_result.results:
+            url = result.get("url", "unknown")
+            title = result.get("title", "")
+ 
+            url_chunk_texts = [
+                c.text for c in web_result.chunks
+                if c.source_url == url
+            ]
+ 
+            if not url_chunk_texts:
+                continue
+ 
+            memory.save_source_chunks(
+                chunks=url_chunk_texts,
+                metadata={
+                    "url": url,
+                    "title": title,
+                    "topic": query,
+                    "session_id": session_id,
+                },
+            )
+            chunks_saved_total += len(url_chunk_texts)
+ 
+        logger.info(
+            f"search_web: persisted {chunks_saved_total} chunks across "
+            f"{len(web_result.results)} URLs to source_chunks"
+        )
+ 
+        # Store serialised result in state 
+        return {"web_results": web_result.to_state_dict()}
 
     def save_to_memory(state: AgentState) -> dict:
         """
-        Node 3: Synthesise web results into a ResearchNote and save to ChromaDB.
-
+        Synthesise web results into a ResearchNote via GPT-4o-mini, then save
+        to ChromaDB research_notes so the router finds it on future queries.
+ 
+        If synthesis fails for any reason, new_note is set to None and
+        generate_answer degrades gracefully rather than crashing.
+ 
+        State reads:  web_results, session_id, query
+        State writes: new_note
         """
-        query = state.get("query", "")
-        web_results = state.get("web_results", {})
+        raw_web = state.get("web_results", {})
+        session_id: str = state.get("session_id", "unknown-session")
+        query: str = state.get("query", "")
+ 
+        if not raw_web or not raw_web.get("results"):
+            logger.warning("save_to_memory: no web_results — skipping synthesis")
+            return {"new_note": None}
+ 
+        # Reconstruct WebSearchResult from state dict
+        web_result = WebSearchResult.from_state_dict(raw_web)
+ 
         logger.info(
-            f"[STUB] save_to_memory: would synthesise and save note for '{query}'. "
-            f"Got {len(web_results.get('results', []))} web result(s)."
+            f"save_to_memory: synthesising note for '{query}' "
+            f"({web_result.total_chunks} chunks, {len(web_result.results)} sources)"
         )
-        return {"new_note": None}
+ 
+        # Synthesise via LLM 
+        try:
+            note: ResearchNote = synthesise_note(web_result, session_id=session_id)
+        except Exception as exc:
+            logger.error(
+                f"save_to_memory: synthesis FAILED for '{query}': {exc}\n"
+                "Setting new_note=None — generate_answer will degrade gracefully."
+            )
+            return {"new_note": None}
+ 
+        # Save to ChromaDB research_notes
+        try:
+            memory.save_research_note(note)
+            logger.info(
+                f"save_to_memory: saved → topic='{note.topic}' "
+                f"confidence={note.confidence:.2f} "
+                f"facts={len(note.key_facts)} sources={len(note.sources)}"
+            )
+        except Exception as exc:
+            # Note was synthesised but couldn't be persisted — still answer this turn
+            logger.error(
+                f"save_to_memory: ChromaDB persist FAILED for '{note.topic}': {exc}. "
+                "This turn can still answer but note won't be in memory next session."
+            )
+ 
+        return {"new_note": note}
 
     def generate_answer(state: AgentState) -> dict:
         """
