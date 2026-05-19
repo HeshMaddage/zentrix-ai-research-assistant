@@ -55,7 +55,8 @@ from typing import Any
 from dotenv import load_dotenv
 from langchain.output_parsers import OutputFixingParser, PydanticOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_openai import ChatOpenAI
+from langchain_groq import ChatGroq
+from langchain_core.language_models import BaseChatModel
 
 from models.research_note import ResearchNote
 from tools.web_search import WebSearchResult
@@ -65,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 # Config 
 
-OPENAI_MODEL: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GROQ_MODEL: str = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 MAX_CONTEXT_CHUNKS: int = int(os.getenv("SYNTHESIS_MAX_CHUNKS", "20"))
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -103,9 +104,11 @@ Output this exact JSON structure:
 FIELD RULES:
 
 topic:
-  - 2–6 words, all lowercase
-  - Include year for time-sensitive topics: "llm fine-tuning 2024"
-  - Use the query as a starting point but make it more precise
+  - 2–8 words, all lowercase
+  - PRESERVE the key terms from the research query — do NOT abbreviate
+    (e.g. if query contains "large language model", keep those words, not "llm")
+  - Include year for time-sensitive topics: "large language model fine-tuning 2024"
+  - Make it slightly more precise than the query if possible, but keep the keywords
 
 summary:
   - Approximately 200 words (this is important for embedding consistency)
@@ -150,32 +153,25 @@ Remember: respond with ONLY the JSON object, nothing else.
 # LLM + parser setup 
 
 
-def _build_llm() -> ChatOpenAI:
+def _build_llm() -> BaseChatModel:
     """
-    Build the ChatOpenAI instance with JSON mode enforced.
-
-    model_kwargs={"response_format": {"type": "json_object"}} tells the OpenAI
-    API to only emit valid JSON tokens. This is more reliable than prompt-only
-    JSON enforcement because it operates at the sampling level.
-
-    Temperature 0 for deterministic synthesis — research notes should be
-    consistent for the same input, not creative.
+    Build and return a ChatGroq instance.
+ 
+    Model: llama-3.3-70b-versatile (free tier).
+    Groq does not support response_format=json_object universally, so we
+    rely on the strict system prompt + _extract_json() fallback instead.
     """
-    api_key = os.getenv("OPENAI_API_KEY")
+    api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         raise EnvironmentError(
-            "OPENAI_API_KEY not found. Add it to your .env file.\n"
-            "Get yours at https://platform.openai.com/api-keys"
+            "GROQ_API_KEY not found in .env.\n"
         )
 
-    return ChatOpenAI(
-        model=OPENAI_MODEL,
-        temperature=0,
-        model_kwargs={"response_format": {"type": "json_object"}},
-    )
+    return ChatGroq(model=GROQ_MODEL, temperature=0)
+    
 
 
-def _build_chain(llm: ChatOpenAI):
+def _build_chain(llm: BaseChatModel):
     """
     Build the prompt | llm chain.
 
@@ -188,11 +184,68 @@ def _build_chain(llm: ChatOpenAI):
     ])
     return prompt | llm
 
+def _extract_json(raw: str) -> dict:
+    """
+    Extract a JSON object from raw LLM output, handling Groq/Llama quirks:
+      - Output wrapped in ```json ... ``` fences
+      - Brief preamble like "Here is the JSON:"
+      - Trailing commentary after the closing brace
+ 
+    Attempts in order:
+      1. Direct json.loads (clean output)
+      2. Strip markdown fences
+      3. Regex extract first {...} block
+      4. Walk balanced braces to find complete {...} block
+    """
+    raw = raw.strip()
+ 
+    # Attempt 1: clean JSON
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        pass
+ 
+    # Attempt 2: strip ```json ... ``` or ``` ... ```
+    fence_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', raw, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+ 
+    # Attempt 3: first {...} block (handles preamble text)
+    brace_match = re.search(r'\{.*\}', raw, re.DOTALL)
+    if brace_match:
+        try:
+            return json.loads(brace_match.group())
+        except json.JSONDecodeError:
+            pass
+ 
+    # Attempt 4: walk balanced braces to find complete {...} block
+    start = raw.find('{')
+    if start != -1:
+        depth = 0
+        for i, ch in enumerate(raw[start:], start):
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(raw[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+ 
+    raise ValueError(
+        f"Could not extract valid JSON from LLM output after 4 attempts.\n"
+        f"Raw output (first 600 chars):\n{raw[:600]}"
+    )
+ 
 
 def _parse_llm_output(
     raw_output: str,
     session_id: str,
-    llm: ChatOpenAI,
+    llm: BaseChatModel,
 ) -> ResearchNote:
     """
     Parse the LLM's JSON output into a ResearchNote.
