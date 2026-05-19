@@ -93,8 +93,10 @@ class ChromaMemoryManager:
                 "ChromaMemoryManager.initialise() must be called before use."
             )
 
-    def _embed(self, text: str) -> List[float]:
+    def _embed(self, text: str, is_query: bool = False) -> List[float]:
         """Embed a single string. Returns a list of floats."""
+        if is_query:
+            text = self._BGE_QUERY_PREFIX + text
         return self._embedder.encode(text, normalize_embeddings=True).tolist()
 
     def _embed_batch(self, texts: List[str]) -> List[List[float]]:
@@ -176,7 +178,7 @@ class ChromaMemoryManager:
             logger.debug("search_memory: collection is empty, returning []")
             return []
 
-        query_embedding = self._embed(query)
+        query_embedding = self._embed(query, is_query=True)
 
         results = self._notes_collection.query(
             query_embeddings=[query_embedding],
@@ -220,7 +222,7 @@ class ChromaMemoryManager:
 
         return notes
 
-    # ── source_chunks collection ──────────────────────────────────────────────
+    # source_chunks collection 
 
     def save_source_chunks(
         self,
@@ -269,7 +271,7 @@ class ChromaMemoryManager:
             f"Saved {len(chunks)} source chunks for URL: {flat_meta.get('url')}"
         )
 
-    # ── Utility methods ───────────────────────────────────────────────────────
+    # Utility methods 
 
     def get_all_topics(self) -> List[str]:
         """
@@ -328,6 +330,18 @@ class ChromaMemoryManager:
         """Return total number of stored source chunks."""
         self._assert_initialised()
         return self._chunks_collection.count()
+    
+    def close(self) -> None:
+        self._notes_collection = None
+        self._chunks_collection = None
+        if self._client is not None:
+            try:
+                # chromadb.PersistentClient wraps a SQLite connection.
+                # Setting _client to None lets Python GC close the handle.
+                self._client = None
+            except Exception:
+                pass
+        logger.debug("ChromaMemoryManager closed.")
 
     def clear_all_notes(self) -> None:
         """
