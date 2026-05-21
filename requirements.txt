@@ -3,7 +3,7 @@
 # Core LLM / Agent Framework 
 langchain==0.3.25
 langchain-community==0.3.24
-langchain-openai==0.3.18
+langchain-groq==0.3.2
 langgraph==0.4.5
  
 # Vector Store

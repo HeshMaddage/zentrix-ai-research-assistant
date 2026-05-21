@@ -1,4 +1,11 @@
 """
+memory/chroma_manager.py
+────────────────────────────────────────────────────────────────────────────────
+Single source of truth for all ChromaDB interactions.
+
+NO other file in this project should import chromadb directly — all vector
+store operations go through ChromaMemoryManager.
+
 Collections managed:
   • research_notes   — one document per topic; document = summary text
   • source_chunks    — raw web content chunks for retrieval augmentation
@@ -7,6 +14,14 @@ Embedding model:
   BAAI/bge-small-en-v1.5 via sentence-transformers.
   Instantiated ONCE at __init__ time and reused — loading from disk takes 2–4s,
   subsequent calls are <100ms.
+
+Key design decisions (from build plan):
+  • PersistentClient(path="./chroma_data/") — NOT chromadb.Client() which is
+    in-memory only and loses data on restart.
+  • All metadata is flat (str/int/float); lists are json.dumps'd in
+    ResearchNote.to_chroma_metadata().
+  • Similarity threshold default = 0.75 (BGE sweet spot per build plan).
+────────────────────────────────────────────────────────────────────────────────
 """
 
 from __future__ import annotations
@@ -28,8 +43,13 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# Constants
+# ── Constants ─────────────────────────────────────────────────────────────────
 EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+"""
+Must be the same model everywhere in the project.
+Never mix models — vectors from different spaces produce meaningless scores.
+"""
+
 CHROMA_PATH: str = "./chroma_data"
 RESEARCH_NOTES_COLLECTION = "research_notes"
 SOURCE_CHUNKS_COLLECTION = "source_chunks"
@@ -40,12 +60,19 @@ DEFAULT_SIMILARITY_THRESHOLD: float = float(
 DEFAULT_TOP_K: int = 5
 
 
-# Manager 
+# ── Manager ───────────────────────────────────────────────────────────────────
 
 
 class ChromaMemoryManager:
     """
     Manages all interactions with ChromaDB for the AI Research Assistant.
+
+    Usage
+    -----
+    manager = ChromaMemoryManager()
+    manager.initialise()          # call once at app startup
+    manager.save_research_note(note)
+    results = manager.search_memory("quantum computing")
     """
 
     def __init__(self, chroma_path: str = CHROMA_PATH) -> None:
@@ -58,11 +85,14 @@ class ChromaMemoryManager:
         self._embedder = SentenceTransformer(EMBEDDING_MODEL)
         logger.info("Embedding model ready.")
 
-    # Lifecycle
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
 
     def initialise(self) -> None:
         """
         Creates (or loads from disk) both ChromaDB collections.
+
+        Must be called before any other method.
+        Idempotent — safe to call multiple times; existing data is not lost.
         """
         self._client = chromadb.PersistentClient(
             path=self.chroma_path,
@@ -85,7 +115,7 @@ class ChromaMemoryManager:
             f"Chunks: {self._chunks_collection.count()}"
         )
 
-    # Internal helpers 
+    # ── Internal helpers ──────────────────────────────────────────────────────
 
     def _assert_initialised(self) -> None:
         if self._client is None:
@@ -93,17 +123,34 @@ class ChromaMemoryManager:
                 "ChromaMemoryManager.initialise() must be called before use."
             )
 
-    def _embed(self, text: str) -> List[float]:
-        """Embed a single string. Returns a list of floats."""
+    # BGE retrieval prefix — improves cosine similarity scores for query vectors.
+    # Applied to QUERIES only, never to stored documents. This asymmetry is
+    # intentional and documented in the BGE model card.
+    _BGE_QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
+
+    def _embed(self, text: str, is_query: bool = False) -> List[float]:
+        """
+        Embed a single string. Returns a list of floats.
+
+        Parameters
+        ----------
+        text : str
+            The text to embed.
+        is_query : bool
+            If True, prepend the BGE retrieval prefix before embedding.
+            Always True for search_memory queries; always False for stored docs.
+        """
+        if is_query:
+            text = self._BGE_QUERY_PREFIX + text
         return self._embedder.encode(text, normalize_embeddings=True).tolist()
 
     def _embed_batch(self, texts: List[str]) -> List[List[float]]:
-        """Embed a batch of strings."""
+        """Embed a batch of document strings (no query prefix)."""
         return self._embedder.encode(
             texts, normalize_embeddings=True, batch_size=32
         ).tolist()
 
-    # research_notes collection 
+    # ── research_notes collection ─────────────────────────────────────────────
 
     def save_research_note(self, note: ResearchNote) -> None:
         """
@@ -176,7 +223,7 @@ class ChromaMemoryManager:
             logger.debug("search_memory: collection is empty, returning []")
             return []
 
-        query_embedding = self._embed(query)
+        query_embedding = self._embed(query, is_query=True)
 
         results = self._notes_collection.query(
             query_embeddings=[query_embedding],
@@ -328,6 +375,27 @@ class ChromaMemoryManager:
         """Return total number of stored source chunks."""
         self._assert_initialised()
         return self._chunks_collection.count()
+
+    def close(self) -> None:
+        """
+        Release the ChromaDB client and collection references.
+
+        MUST be called before shutil.rmtree() on Windows — ChromaDB holds an
+        open file handle on chroma.sqlite3 through the PersistentClient.
+        Calling close() releases it so the directory can be deleted.
+
+        Safe to call even if initialise() was never called.
+        """
+        self._notes_collection = None
+        self._chunks_collection = None
+        if self._client is not None:
+            try:
+                # chromadb.PersistentClient wraps a SQLite connection.
+                # Setting _client to None lets Python GC close the handle.
+                self._client = None
+            except Exception:
+                pass
+        logger.debug("ChromaMemoryManager closed.")
 
     def clear_all_notes(self) -> None:
         """
