@@ -22,7 +22,7 @@ from langchain_core.messages import AIMessage
 from agent.state import AgentState
 from memory.chroma_manager import ChromaMemoryManager
 from models.research_note import ResearchNote
-from prompts.synthesis_prompt import synthesise_note
+from prompts.synthesis_promt import synthesise_note
 from tools.web_search import WebSearchResult, search_and_chunk
 
 load_dotenv()
