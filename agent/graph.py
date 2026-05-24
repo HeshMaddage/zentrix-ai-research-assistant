@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sqlite3
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -114,9 +115,15 @@ def build_graph(
     # SqliteSaver persists the full AgentState to SQLite after every node.
     # Each conversation is stored under its thread_id (session_id).
     # The sessions.db file is created automatically on first run.
-    checkpointer = SqliteSaver.from_conn_string(sessions_db)
-    logger.info(f"build_graph: checkpointer → '{sessions_db}'")
+    #++++++++++++++++++++++++++++++++++++++
+    # checkpointer = SqliteSaver.from_conn_string(sessions_db)
+    # logger.info(f"build_graph: checkpointer → '{sessions_db}'")
+    #++++++++++++++++++++++++++++++++++++++
 
+
+    conn = sqlite3.connect(sessions_db, check_same_thread=False)
+    checkpointer = SqliteSaver(conn)
+    logger.info(f"build_graph: checkpointer → '{sessions_db}'")
     # Compile and return
     compiled = builder.compile(checkpointer=checkpointer)
     logger.info("build_graph: graph compiled successfully ✓")
@@ -124,10 +131,10 @@ def build_graph(
 
 
 def get_initial_state(session_id: str, user_message: str) -> dict:
-    from langchain_core.messages import HumanMessage
+
 
     return {
-        "messages": [HumanMessage(content=user_message)],
+        "messages": [{"type": "human", "content": user_message}],
         "session_id": session_id,
         "query": "",               # set by classify_intent
         "intent": "",              # set by classify_intent

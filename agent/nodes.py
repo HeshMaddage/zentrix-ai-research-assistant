@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -173,7 +173,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
             return {
                 "query": query,
                 "intent": "answer_from_memory",
-                "retrieved_notes": passing_notes,
+                "retrieved_notes": [n.model_dump() for n in passing_notes],
                 "memory_hit": True,
             }
         else:
@@ -184,24 +184,14 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 "retrieved_notes": [],
                 "memory_hit": False,
             }
-
-
-    def retrieve_from_memory(state: AgentState) -> dict:
-        """
-        Node 2a: Refine and finalise the memory retrieval.
-        """
-        notes = state.get("retrieved_notes", [])
-        logger.info(
-            f"[STUB] retrieve_from_memory: {len(notes)} note(s) available. "
-            f"Topics: {[n.topic for n in notes]}"
-        )
-        # Pass-through — no state change needed (classify_intent did the work)
-        return {}
     
     def retrieve_from_memory(state: AgentState) -> dict:
         
-        notes: List[ResearchNote] = state.get("retrieved_notes", [])
-        query: str = state.get("query", "")
+        raw_notes = state.get("retrieved_notes", [])
+        notes: List[ResearchNote] = [
+            ResearchNote(**n) if isinstance(n, dict) else n
+            for n in raw_notes
+        ]
  
         if not notes:
             logger.warning("retrieve_from_memory: no notes — falling through to generate_answer")
@@ -222,7 +212,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
  
         # State: confirm memory hit and keep the notes as-is for generate_answer
         return {
-            "retrieved_notes": notes,
+            "retrieved_notes": [n.model_dump() for n in notes],
             "memory_hit": True,
         }
 
@@ -321,7 +311,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 "This turn can still answer but note won't be in memory next session."
             )
  
-        return {"new_note": note}
+        return {"new_note": note.model_dump()}
 
     def generate_answer(state: AgentState) -> dict:
         """
@@ -369,20 +359,30 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
 
         logger.info(f"generate_answer: intent={intent}, memory_hit={memory_hit}")
 
-        answer_message = AIMessage(content=stub_text)
+        # answer_message = AIMessage(content=stub_text)
 
         return {
             "final_answer": stub_text,
-            "messages": [answer_message],   # add_messages reducer appends this
+            "messages": [{"type": "ai", "content": stub_text}],   # add_messages reducer appends this
         }
 
     def generate_answer(state: AgentState) -> dict:
         intent: str = state.get("intent", "unknown")
         query: str = state.get("query", "")
-        retrieved_notes: List[ResearchNote] = state.get("retrieved_notes", [])
         memory_hit: bool = state.get("memory_hit", False)
-        new_note: Optional[ResearchNote] = state.get("new_note")
         messages = state.get("messages", [])
+        raw_notes = state.get("retrieved_notes", [])
+        retrieved_notes: List[ResearchNote] = [
+            ResearchNote(**n) if isinstance(n, dict) else n
+            for n in raw_notes
+        ]
+ 
+        raw_new_note = state.get("new_note")
+        new_note: Optional[ResearchNote] = (
+            ResearchNote(**raw_new_note)
+            if isinstance(raw_new_note, dict)
+            else raw_new_note
+        )
  
         logger.info(
             f"generate_answer: intent={intent} memory_hit={memory_hit} "
@@ -458,7 +458,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
  
         return {
             "final_answer": answer,
-            "messages": [AIMessage(content=answer)],
+            "messages": [{"type": "ai", "content": answer}],
         }
 
     return {
@@ -468,3 +468,4 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
         "save_to_memory": save_to_memory,
         "generate_answer": generate_answer,
     }
+
