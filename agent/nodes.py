@@ -7,6 +7,7 @@ Node execution order (determined by graph edges in graph.py):
     ├── "answer_from_context" ──────────────────────────► generate_answer
     └── "research_and_answer" ──► search_web ──► save_to_memory ──► generate_answer
                                                                           │
+                                                                          END
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -22,6 +23,7 @@ from langchain_core.messages import AIMessage
 from agent.state import AgentState
 from memory.chroma_manager import ChromaMemoryManager
 from models.research_note import ResearchNote
+from prompts.answer_promts import generate_context_answer, generate_memory_answer, generate_web_answer
 from prompts.synthesis_promt import synthesise_note
 from tools.web_search import WebSearchResult, search_and_chunk
 
@@ -129,7 +131,6 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
         logger.info(f"classify_intent: query='{query[:80]}{'...' if len(query) > 80 else ''}'")
 
         # Conversational follow-up check 
-        # Check this BEFORE hitting ChromaDB — no embedding needed
         if _is_followup(query):
             logger.info("classify_intent: follow-up detected → 'answer_from_context'")
             return {
@@ -172,7 +173,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
             return {
                 "query": query,
                 "intent": "answer_from_memory",
-                "retrieved_notes": passing_notes,
+                "retrieved_notes": [n.model_dump() for n in passing_notes],
                 "memory_hit": True,
             }
         else:
@@ -183,32 +184,40 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 "retrieved_notes": [],
                 "memory_hit": False,
             }
-
-
+    
     def retrieve_from_memory(state: AgentState) -> dict:
-        """
-        Node 2a: Refine and finalise the memory retrieval.
-        """
-        notes = state.get("retrieved_notes", [])
+        
+        raw_notes = state.get("retrieved_notes", [])
+        notes: List[ResearchNote] = [
+            ResearchNote(**n) if isinstance(n, dict) else n
+            for n in raw_notes
+        ]
+ 
+        if not notes:
+            logger.warning("retrieve_from_memory: no notes — falling through to generate_answer")
+            return {"memory_hit": False}
+ 
         logger.info(
-            f"[STUB] retrieve_from_memory: {len(notes)} note(s) available. "
+            f"retrieve_from_memory: {len(notes)} note(s). "
             f"Topics: {[n.topic for n in notes]}"
         )
-        # Pass-through — no state change needed (classify_intent did the work)
-        return {}
-
+ 
+        # Log formatted context (helps debugging similarity issues)
+        for i, note in enumerate(notes):
+            logger.debug(
+                f"  Note {i+1}: topic='{note.topic}' "
+                f"age={note.age_days():.1f}d conf={note.confidence:.2f} "
+                f"facts={len(note.key_facts)}"
+            )
+ 
+        # State: confirm memory hit and keep the notes as-is for generate_answer
+        return {
+            "retrieved_notes": [n.model_dump() for n in notes],
+            "memory_hit": True,
+        }
 
     def search_web(state: AgentState) -> dict:
-        """
-        Search Tavily, chunk results, and immediately persist raw evidence to
-        ChromaDB source_chunks — BEFORE synthesis, so evidence is never lost.
- 
-        Raw chunks are saved per-URL so that each chunk carries an accurate
-        'url' metadata key for source attribution in future retrieval.
- 
-        State reads:  query, session_id
-        State writes: web_results (serialised WebSearchResult dict)
-        """
+
         query: str = state.get("query", "")
         session_id: str = state.get("session_id", "unknown-session")
  
@@ -261,16 +270,6 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
         return {"web_results": web_result.to_state_dict()}
 
     def save_to_memory(state: AgentState) -> dict:
-        """
-        Synthesise web results into a ResearchNote via GPT-4o-mini, then save
-        to ChromaDB research_notes so the router finds it on future queries.
- 
-        If synthesis fails for any reason, new_note is set to None and
-        generate_answer degrades gracefully rather than crashing.
- 
-        State reads:  web_results, session_id, query
-        State writes: new_note
-        """
         raw_web = state.get("web_results", {})
         session_id: str = state.get("session_id", "unknown-session")
         query: str = state.get("query", "")
@@ -312,7 +311,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 "This turn can still answer but note won't be in memory next session."
             )
  
-        return {"new_note": note}
+        return {"new_note": note.model_dump()}
 
     def generate_answer(state: AgentState) -> dict:
         """
@@ -360,14 +359,108 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
 
         logger.info(f"generate_answer: intent={intent}, memory_hit={memory_hit}")
 
-        answer_message = AIMessage(content=stub_text)
+        # answer_message = AIMessage(content=stub_text)
 
         return {
             "final_answer": stub_text,
-            "messages": [answer_message],   # add_messages reducer appends this
+            "messages": [{"type": "ai", "content": stub_text}],   # add_messages reducer appends this
         }
 
-    # Return all nodes as a dict 
+    def generate_answer(state: AgentState) -> dict:
+        intent: str = state.get("intent", "unknown")
+        query: str = state.get("query", "")
+        memory_hit: bool = state.get("memory_hit", False)
+        messages = state.get("messages", [])
+        raw_notes = state.get("retrieved_notes", [])
+        retrieved_notes: List[ResearchNote] = [
+            ResearchNote(**n) if isinstance(n, dict) else n
+            for n in raw_notes
+        ]
+ 
+        raw_new_note = state.get("new_note")
+        new_note: Optional[ResearchNote] = (
+            ResearchNote(**raw_new_note)
+            if isinstance(raw_new_note, dict)
+            else raw_new_note
+        )
+ 
+        logger.info(
+            f"generate_answer: intent={intent} memory_hit={memory_hit} "
+            f"notes={len(retrieved_notes)} has_new_note={new_note is not None}"
+        )
+ 
+        if memory_hit and retrieved_notes:
+            try:
+                answer = generate_memory_answer(
+                    query=query,
+                    notes=retrieved_notes,
+                    messages=messages,
+                )
+                logger.info("generate_answer: memory path complete")
+            except Exception as exc:
+                logger.error(f"generate_answer: memory LLM call failed: {exc}")
+                # Graceful fallback — show formatted notes without LLM prose
+                note = retrieved_notes[0]
+                facts_str = "\n".join(f"  • {f}" for f in note.key_facts)
+                answer = (
+                    f"**{note.topic.title()}** *(from memory)*\n\n"
+                    f"{note.summary}\n\n"
+                    f"**Key Facts:**\n{facts_str}"
+                )
+ 
+        elif intent == "research_and_answer" and new_note is not None:
+            try:
+                answer = generate_web_answer(
+                    query=query,
+                    note=new_note,
+                    messages=messages,
+                )
+                logger.info("generate_answer: web path complete")
+            except Exception as exc:
+                logger.error(f"generate_answer: web LLM call failed: {exc}")
+                facts_str = "\n".join(f"  • {f}" for f in new_note.key_facts)
+                sources_str = "\n".join(
+                    f"  [{i+1}] {s}" for i, s in enumerate(new_note.sources)
+                )
+                answer = (
+                    f"**{new_note.topic.title()}**\n\n"
+                    f"{new_note.summary}\n\n"
+                    f"**Key Facts:**\n{facts_str}\n\n"
+                    f"**Sources:**\n{sources_str}"
+                )
+ 
+        elif intent == "research_and_answer" and new_note is None:
+            answer = (
+                f"I searched the web for '{query}' but was unable to synthesise "
+                f"a complete answer. Please check your GROQ_API_KEY and try again, "
+                f"or rephrase the question."
+            )
+
+        elif intent == "answer_from_context":
+            try:
+                answer = generate_context_answer(
+                    query=query,
+                    messages=messages,
+                )
+                logger.info("generate_answer: context path complete")
+            except Exception as exc:
+                logger.error(f"generate_answer: context LLM call failed: {exc}")
+                answer = (
+                    f"I had trouble referencing the conversation context to answer "
+                    f"'{query}'. Could you rephrase or ask a more specific question?"
+                )
+ 
+        else:
+            answer = (
+                f"I wasn't able to determine how to answer '{query}'. "
+                f"Please try rephrasing."
+            )
+ 
+        return {
+            "final_answer": answer,
+            "messages": [{"type": "ai", "content": answer}],
+        }
+
     return {
         "classify_intent": classify_intent,
         "retrieve_from_memory": retrieve_from_memory,
@@ -375,3 +468,4 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
         "save_to_memory": save_to_memory,
         "generate_answer": generate_answer,
     }
+
