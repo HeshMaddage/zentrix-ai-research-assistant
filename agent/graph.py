@@ -17,7 +17,7 @@ from typing import Literal
 
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.memory import MemorySaver
 
 from agent.nodes import get_nodes
 from agent.state import AgentState
@@ -121,9 +121,8 @@ def build_graph(
     #++++++++++++++++++++++++++++++++++++++
 
 
-    conn = sqlite3.connect(sessions_db, check_same_thread=False)
-    checkpointer = SqliteSaver(conn)
-    logger.info(f"build_graph: checkpointer → '{sessions_db}'")
+    checkpointer = MemorySaver()
+    logger.info("build_graph: checkpointer → MemorySaver (in-process)")
     # Compile and return
     compiled = builder.compile(checkpointer=checkpointer)
     logger.info("build_graph: graph compiled successfully ✓")

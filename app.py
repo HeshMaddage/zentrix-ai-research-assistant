@@ -9,7 +9,7 @@ import uuid
 
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_core.messages import AIMessage, HumanMessage
+# from langchain_core.messages import AIMessage, HumanMessage
 
 load_dotenv()
 
@@ -100,7 +100,7 @@ def run_graph_with_status(user_query: str, status_placeholder) -> dict:
         initial_input = get_initial_state(session_id, user_query)
     else:
         # Subsequent messages — checkpointer restores prior state
-        initial_input = {"messages": [HumanMessage(content=user_query)]}
+        initial_input = {"messages": [{"type": "human", "content": user_query}]}
 
     # Node-name → human-readable status message
     NODE_STATUS = {
@@ -114,17 +114,19 @@ def run_graph_with_status(user_query: str, status_placeholder) -> dict:
     final_state = {}
 
     # stream() yields (node_name, state_update) tuples after each node
-    for node_name, state_update in graph.stream(
+    for chunk in graph.stream(
         initial_input,
         config=config,
         stream_mode="updates",
     ):
-        status_msg = NODE_STATUS.get(node_name, f"⚙️ Running {node_name}…")
-        status_placeholder.markdown(
-            f'<div style="color:#6b7280;font-size:0.85rem">{status_msg}</div>',
-            unsafe_allow_html=True,
-        )
-        final_state.update(state_update)
+        for node_name, state_update in chunk.items():   # ← THE FIX
+            status_msg = NODE_STATUS.get(node_name, f"⚙️ Running {node_name}…")
+            status_placeholder.markdown(
+                f'<div style="color:#6b7280;font-size:0.85rem">{status_msg}</div>',
+                unsafe_allow_html=True,
+            )
+            if isinstance(state_update, dict):
+                final_state.update(state_update)
 
     status_placeholder.empty()
     return final_state
