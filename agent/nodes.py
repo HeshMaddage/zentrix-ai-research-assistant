@@ -314,59 +314,6 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
         return {"new_note": note.model_dump()}
 
     def generate_answer(state: AgentState) -> dict:
-        """
-        Node 4: Generate the final answer and append it to messages.
-
-        """
-        intent = state.get("intent", "unknown")
-        query = state.get("query", "")
-        retrieved_notes = state.get("retrieved_notes", [])
-        memory_hit = state.get("memory_hit", False)
-        web_results = state.get("web_results", {})
-
-        if intent == "answer_from_memory":
-            topics = [n.topic for n in retrieved_notes]
-            stub_text = (
-                f"[STUB] Intent: answer_from_memory ✓\n"
-                f"Query: '{query}'\n"
-                f"Memory hit: {memory_hit}\n"
-                f"Retrieved notes ({len(retrieved_notes)}): {topics}\n\n"
-                f"→ This node will call GPT-4o-mini with the retrieved "
-                f"note summaries and produce a real answer."
-            )
-        elif intent == "answer_from_context":
-            stub_text = (
-                f"[STUB] Intent: answer_from_context\n"
-                f"Query: '{query}'\n"
-                f"→ Follow-up detected. This will reference prior "
-                f"messages in the conversation to answer without hitting ChromaDB."
-            )
-        elif intent == "research_and_answer":
-            result_count = len(web_results.get("results", []))
-            stub_text = (
-                f"[STUB] Intent: research_and_answer\n"
-                f"Query: '{query}'\n"
-                f"Web results: {result_count} (stub — web search not yet implemented)\n"
-                f"→ This will synthesise web results into a note, "
-                f"save it, and generate a full answer."
-            )
-        else:
-            stub_text = (
-                f"[STUB] Intent: {intent}\n"
-                f"Query: '{query}'\n"
-                f"→ Unrecognised intent. Clarification would be requested here."
-            )
-
-        logger.info(f"generate_answer: intent={intent}, memory_hit={memory_hit}")
-
-        # answer_message = AIMessage(content=stub_text)
-
-        return {
-            "final_answer": stub_text,
-            "messages": [{"type": "ai", "content": stub_text}],   # add_messages reducer appends this
-        }
-
-    def generate_answer(state: AgentState) -> dict:
         intent: str = state.get("intent", "unknown")
         query: str = state.get("query", "")
         memory_hit: bool = state.get("memory_hit", False)
