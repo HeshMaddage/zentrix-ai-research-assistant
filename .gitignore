@@ -36,3 +36,10 @@ htmlcov/
  
 # ── Streamlit cache ───────────────────────────────────────────────────────────
 .streamlit/
+
+# Local databases and runtime data
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+chroma_data*/
