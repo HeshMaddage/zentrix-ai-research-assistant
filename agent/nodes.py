@@ -16,6 +16,7 @@ import logging
 import os
 import re
 from typing import Dict, List, Optional
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessage
@@ -88,6 +89,37 @@ def _passes_routing_threshold(
             f"sim={similarity:.3f}, age={note.age_days():.1f}d, conf={note.confidence:.2f}"
         )
     return all(conditions.values())
+
+
+def _format_sources(sources: List[str], web_results: Optional[dict] = None) -> str:
+    if not sources:
+        return ""
+    
+    # Build URL to Title mapping if web_results is provided
+    url_to_title = {}
+    if web_results and "results" in web_results:
+        for res in web_results["results"]:
+            url = res.get("url")
+            title = res.get("title")
+            if url and title:
+                url_to_title[url] = title.strip()
+                
+    lines = ["\n\n### References"]
+    for i, src in enumerate(sources):
+        try:
+            # Check if we have a title from web results
+            title = url_to_title.get(src)
+            if not title:
+                # Fallback to domain name
+                parsed = urlparse(src)
+                domain = parsed.netloc.replace("www.", "")
+                title = domain if domain else src
+            
+            lines.append(f"- **[{i+1}]** [{title}]({src})")
+        except Exception:
+            lines.append(f"- **[{i+1}]** [{src}]({src})")
+            
+    return "\n".join(lines)
 
 
 # Node factory 
@@ -336,7 +368,17 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
             f"notes={len(retrieved_notes)} has_new_note={new_note is not None}"
         )
  
+        answer = ""
+        sources = []
+
         if memory_hit and retrieved_notes:
+            # Collect sources from all retrieved notes for reference
+            seen_sources = set()
+            for note in retrieved_notes:
+                for src in note.sources:
+                    if src not in seen_sources:
+                        seen_sources.add(src)
+                        sources.append(src)
             try:
                 answer = generate_memory_answer(
                     query=query,
@@ -356,6 +398,8 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 )
  
         elif intent == "research_and_answer" and new_note is not None:
+            if new_note.sources:
+                sources = new_note.sources
             try:
                 answer = generate_web_answer(
                     query=query,
@@ -366,14 +410,10 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
             except Exception as exc:
                 logger.error(f"generate_answer: web LLM call failed: {exc}")
                 facts_str = "\n".join(f"  • {f}" for f in new_note.key_facts)
-                sources_str = "\n".join(
-                    f"  [{i+1}] {s}" for i, s in enumerate(new_note.sources)
-                )
                 answer = (
                     f"**{new_note.topic.title()}**\n\n"
                     f"{new_note.summary}\n\n"
-                    f"**Key Facts:**\n{facts_str}\n\n"
-                    f"**Sources:**\n{sources_str}"
+                    f"**Key Facts:**\n{facts_str}"
                 )
  
         elif intent == "research_and_answer" and new_note is None:
@@ -382,7 +422,7 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 f"a complete answer. Please check your GROQ_API_KEY and try again, "
                 f"or rephrase the question."
             )
-
+ 
         elif intent == "answer_from_context":
             try:
                 answer = generate_context_answer(
@@ -403,6 +443,10 @@ def get_nodes(memory: ChromaMemoryManager) -> Dict:
                 f"Please try rephrasing."
             )
  
+        # Format and append sources/references if available
+        if sources:
+            answer += _format_sources(sources, state.get("web_results"))
+
         return {
             "final_answer": answer,
             "messages": [{"type": "ai", "content": answer}],
